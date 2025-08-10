@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/dao-recordset-simple.json",
+  "title": "DAO Recordset",
+  "description": "Simple JSON Schema for a DAO Recordset representing query results",
+  "type": "object",
+  "required": ["fields", "data"],
+  "properties": {
+    "fields": {
+      "type": "array",
+      "description": "Array of field definitions",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Field/column name"
+          },
+          "type": {
+            "type": "string",
+            "description": "Data type of the field",
+            "enum": [
+              "string",
+              "number",
+              "integer",
+              "boolean",
+              "date",
+              "datetime",
+              "decimal",
+              "text",
+              "binary"
+            ]
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "array",
+      "description": "Array of data rows",
+      "items": {
+        "type": "object",
+        "description": "A single row of data with field names as keys",
+        "additionalProperties": {
+          "description": "Field values keyed by field name",
+          "oneOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"}
+          ]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "fields": [
+        {
+          "name": "CustomerID",
+          "type": "string"
+        },
+        {
+          "name": "CompanyName",
+          "type": "string"
+        },
+        {
+          "name": "OrderCount",
+          "type": "integer"
+        },
+        {
+          "name": "TotalRevenue",
+          "type": "decimal"
+        },
+        {
+          "name": "IsActive",
+          "type": "boolean"
+        },
+        {
+          "name": "LastOrderDate",
+          "type": "date"
+        }
+      ],
+      "data": [
+        {
+          "CustomerID": "ALFKI",
+          "CompanyName": "Alfreds Futterkiste",
+          "OrderCount": 6,
+          "TotalRevenue": 2302.50,
+          "IsActive": true,
+          "LastOrderDate": "2024-12-15"
+        },
+        {
+          "CustomerID": "ANATR",
+          "CompanyName": "Ana Trujillo Emparedados",
+          "OrderCount": 4,
+          "TotalRevenue": 1402.95,
+          "IsActive": true,
+          "LastOrderDate": "2024-11-28"
+        },
+        {
+          "CustomerID": "ANTON",
+          "CompanyName": "Antonio Moreno Taquería",
+          "OrderCount": 7,
+          "TotalRevenue": 3150.00,
+          "IsActive": false,
+          "LastOrderDate": "2024-09-10"
+        }
+      ]
+    }
+  ]
+}
