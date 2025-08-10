@@ -1,7 +1,9 @@
 # Commit History
 
-88e9bc0 - James Cotrotsios, 5 seconds ago : Added JSON Conversion Capabilities - v1
-803105a - James Cotrotsios, 19 hours ago : Initial commit
+1ed0244 - James Cotrotsios, 5 seconds ago : Added JSON Integration Capabilities - v2
+a01475d - James Cotrotsios, 14 minutes ago : DOC: Add commit history and rollback guide
+88e9bc0 - James Cotrotsios, 15 minutes ago : Added JSON Conversion Capabilities - v1
+803105a - James Cotrotsios, 20 hours ago : Initial commit
 
 # How to Rollback to a Previous Commit
 
