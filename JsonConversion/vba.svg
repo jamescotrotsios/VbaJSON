@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+     viewBox="0 0 24 24" role="img" aria-label="vb file icon"
+     shape-rendering="geometricPrecision">
+  <!-- Darker blue small-caps "vb" on transparent background -->
+  <text x="12" y="17"
+        text-anchor="middle"
+        font-size="15"
+        font-weight="700"
+        font-family="Inter, 'Segoe UI', Roboto, Arial, sans-serif"
+        font-variant="small-caps"
+        fill="#1E90FF"
+        letter-spacing="-0.5">
+    vb
+  </text>
+</svg>
