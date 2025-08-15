@@ -1,0 +1,2349 @@
+VERSION 1.0 CLASS
+BEGIN
+  MultiUse = -1  'True
+END
+Attribute VB_Name = "StringBuilder"
+Attribute VB_GlobalNameSpace = False
+Attribute VB_Creatable = False
+Attribute VB_PredeclaredId = True
+Attribute VB_Exposed = True
+Attribute VB_Description = "Represents a mutable string of characters."
+'@Folder("VBA-Blocks.StringBuilder")
+'@Description("Represents a mutable string of characters.")
+'based on the original work by @Blackhawk posted on Code Review Stack Exchange under CC-BY-SA.
+'https://codereview.stackexchange.com/q/67596/23788
+'adapted by Mathieu Guindon
+'https://github.com/retailcoder/VBA-StringBuilder
+
+Option Explicit
+
+Private Declare PtrSafe Sub CopyMemory Lib "kernel32.dll" Alias "RtlMoveMemory" (ByVal dst As LongPtr, ByVal src As LongPtr, ByVal Length As LongPtr)
+
+Public Enum StringBuilderError
+    AppendFailed = vbObjectError Or 255
+        InvalidMemberCall
+End Enum
+
+Private Const InitialCharCapacity As Long = 16
+Private Const CharByteSize As Long = 2
+
+Private currentByteLength As Long
+Private buffer() As Byte
+
+'@Description("Creates a new instance, optionally initialized with the specified content and/or character capacity.")
+Public Function Create(Optional ByVal content As String, Optional ByVal initialCapacity As Long = InitialCharCapacity) As StringBuilder
+Attribute Create.VB_Description = "Creates a new instance, optionally initialized with the specified content and/or capacity."
+        Dim result As StringBuilder
+        Set result = New StringBuilder
+        result.Capacity = IIf(initialCapacity < Len(content), Len(content), initialCapacity)
+        result.Append content
+        Set Create = result
+End Function
+
+Private Property Get IsDefaultInstance() As Boolean
+        IsDefaultInstance = Me Is StringBuilder
+End Property
+
+Private Sub ThrowIfInvalidMemberCall()
+        If IsDefaultInstance Then Err.Raise StringBuilderError.InvalidMemberCall, TypeName(Me), "Member call is invalid against default instance."
+End Sub
+
+'@Description("Appends a copy of the specified string to this instance.")
+Public Function Append(ByVal value As String) As StringBuilder
+Attribute Append.VB_Description = "Appends a copy of the specified string to this instance."
+        ThrowIfInvalidMemberCall
+    On Error GoTo CleanFail
+    
+    Dim valueByteLength As Long
+    valueByteLength = LenB(value)
+    
+    Dim newBufferSize As Long
+    newBufferSize = currentByteLength + valueByteLength
+    
+    If newBufferSize < UBound(buffer) Then
+        'got room, no need to resize
+        CopyMemory VarPtr(buffer(currentByteLength)), StrPtr(value), valueByteLength
+    Else
+        If newBufferSize < UBound(buffer) * 2 Then
+            'double buffer capacity
+            ResizeBuffer
+        Else
+            ResizeBuffer newBufferSize
+        End If
+        CopyMemory VarPtr(buffer(currentByteLength)), StrPtr(value), valueByteLength
+    End If
+    
+    currentByteLength = newBufferSize
+    Set Append = Me
+    
+CleanExit:
+    Exit Function
+
+CleanFail:
+    'Set Append = Nothing
+    'Resume CleanExit
+    With Err
+        .Raise StringBuilderError.AppendFailed, TypeName(Me), .Description
+    End With
+End Function
+
+'@Description("Gets the character length of the current instance.")
+Public Property Get Length() As Long
+Attribute Length.VB_Description = "Gets the character length of the current instance."
+        ThrowIfInvalidMemberCall
+    Length = currentByteLength / CharByteSize
+End Property
+
+'@Description("Gets the current buffer capacity of the current instance.")
+Public Property Get Capacity() As Long
+Attribute Capacity.VB_Description = "Gets the current buffer capacity of the current instance."
+        ThrowIfInvalidMemberCall
+    Capacity = UBound(buffer)
+End Property
+
+Friend Property Let Capacity(ByVal value As Long)
+        ThrowIfInvalidMemberCall
+        ReDim buffer(0 To (value * CharByteSize) - 1)
+End Property
+
+Private Sub ResizeBuffer(Optional ByVal newSize As Long = 0)
+    If newSize <> 0 Then
+        ReDim Preserve buffer(0 To newSize - 1)
+    Else
+        ReDim Preserve buffer(0 To (UBound(buffer) * 2) + 1)
+    End If
+End Sub
+
+'@Description("Returns the string content of the current instance.")
+Public Function ToString() As String
+Attribute ToString.VB_Description = "Returns the string content of the current instance."
+        ThrowIfInvalidMemberCall
+    ToString = Mid$(buffer, 1, currentByteLength / CharByteSize)
+End Function
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+Attribute VB_Name = "JsonToRecordsetHelper"
+'Requires reference to: Microsoft ActiveX Data Objects Library (any version 2.x or higher)
+
+'@Description("Converts a JSON string to an in-memory ADODB Recordset (no temp table required)")
+Public Function JSONToRecordset(ByVal jsonString As String) As ADODB.Recordset
+    On Error GoTo ErrorHandler
+    
+    ' Create a new disconnected recordset
+    Dim rs As New ADODB.Recordset
+    
+    ' Parse the JSON to extract fields and data
+    Dim fields As Collection
+    Dim dataRows As Collection
+    
+    Set fields = ParseFields(jsonString)
+    Set dataRows = ParseData(jsonString)
+    
+    ' Define the recordset structure based on fields
+    Dim fieldInfo As Object
+    For Each fieldInfo In fields
+        rs.fields.Append fieldInfo("name"), GetADODataType(fieldInfo("type")), _
+                         GetFieldSize(fieldInfo("type")), adFldMayBeNull
+    Next fieldInfo
+    
+    ' Open the recordset in memory (disconnected)
+    rs.CursorLocation = adUseClient
+    rs.CursorType = adOpenStatic
+    rs.LockType = adLockOptimistic
+    rs.Open
+    
+    ' Populate the recordset with data
+    Dim rowData As Object
+    For Each rowData In dataRows
+        rs.AddNew
+        
+        For Each fieldInfo In fields
+            Dim fieldName As String
+            fieldName = fieldInfo("name")
+            
+            If rowData.Exists(fieldName) Then
+                Dim value As Variant
+                value = rowData(fieldName)
+                
+                If Not IsNull(value) Then
+                    ' Handle date strings
+                    If fieldInfo("type") = "date" Or fieldInfo("type") = "datetime" Then
+                        If VarType(value) = vbString Then
+                            value = ParseISODate(CStr(value))
+                        End If
+                    End If
+                    
+                    rs.fields(fieldName).value = value
+                Else
+                    rs.fields(fieldName).value = Null
+                End If
+            End If
+        Next fieldInfo
+        
+        rs.Update
+    Next rowData
+    
+    ' Move to first record if we have data
+    If rs.RecordCount > 0 Then
+        rs.MoveFirst
+    End If
+    
+    Set JSONToRecordset = rs
+    Exit Function
+    
+ErrorHandler:
+    If Not rs Is Nothing Then
+        If rs.State = adStateOpen Then rs.Close
+        Set rs = Nothing
+    End If
+    Err.Raise Err.Number, "JSONToRecordset", "Error converting JSON to Recordset: " & Err.Description
+End Function
+
+'@Description("Maps JSON types to ADO data types")
+Private Function GetADODataType(ByVal jsonType As String) As ADODB.DataTypeEnum
+    Select Case LCase(jsonType)
+        Case "boolean"
+            GetADODataType = adBoolean
+        Case "integer"
+            GetADODataType = adInteger
+        Case "number"
+            GetADODataType = adDouble
+        Case "decimal"
+            GetADODataType = adCurrency
+        Case "date", "datetime"
+            GetADODataType = adDate
+        Case "text"
+            GetADODataType = adLongVarWChar
+        Case "binary"
+            GetADODataType = adLongVarBinary
+        Case Else ' "string" and default
+            GetADODataType = adVarWChar
+    End Select
+End Function
+
+'@Description("Gets appropriate field size for data type")
+Private Function GetFieldSize(ByVal jsonType As String) As Long
+    Select Case LCase(jsonType)
+        Case "string"
+            GetFieldSize = 255
+        Case "text"
+            GetFieldSize = 2147483647 ' Max long value for memo
+        Case "binary"
+            GetFieldSize = 2147483647
+        Case Else
+            GetFieldSize = 0 ' Size not applicable for numbers, dates, etc.
+    End Select
+End Function
+
+'@Description("Alternative version that returns a DAO-compatible recordset wrapper")
+Public Function JSONToDAOCompatible(ByVal jsonString As String) As Object
+    ' This returns an ADODB recordset that can be used similarly to DAO
+    Set JSONToDAOCompatible = JSONToRecordset(jsonString)
+End Function
+
+'@Description("Parses the fields array from JSON")
+Private Function ParseFields(ByVal jsonString As String) As Collection
+    Dim fields As New Collection
+    Dim fieldsStart As Long
+    Dim fieldsEnd As Long
+    
+    ' Find the "fields" array
+    fieldsStart = InStr(jsonString, """fields""")
+    If fieldsStart = 0 Then
+        Err.Raise vbObjectError + 1001, "ParseFields", "No 'fields' array found in JSON"
+    End If
+    
+    ' Find the opening bracket of the fields array
+    fieldsStart = InStr(fieldsStart, jsonString, "[")
+    fieldsEnd = FindMatchingBracket(jsonString, fieldsStart, "[", "]")
+    
+    Dim fieldsContent As String
+    fieldsContent = Mid$(jsonString, fieldsStart + 1, fieldsEnd - fieldsStart - 1)
+    
+    ' Parse each field object
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(fieldsContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, fieldsContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(fieldsContent, objectStart, "{", "}")
+        
+        Dim fieldObj As String
+        fieldObj = Mid$(fieldsContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        ' Extract name and type from field object
+        Dim fieldInfo As Object
+        Set fieldInfo = CreateObject("Scripting.Dictionary")
+        
+        fieldInfo("name") = ExtractJsonValue(fieldObj, "name")
+        fieldInfo("type") = ExtractJsonValue(fieldObj, "type")
+        
+        fields.Add fieldInfo
+        
+        pos = objectEnd + 1
+    Loop
+    
+    Set ParseFields = fields
+End Function
+
+'@Description("Parses the data array from JSON")
+Private Function ParseData(ByVal jsonString As String) As Collection
+    Dim dataRows As New Collection
+    Dim dataStart As Long
+    Dim dataEnd As Long
+    
+    ' Find the "data" array
+    dataStart = InStr(jsonString, """data""")
+    If dataStart = 0 Then
+        Err.Raise vbObjectError + 1002, "ParseData", "No 'data' array found in JSON"
+    End If
+    
+    ' Find the opening bracket of the data array
+    dataStart = InStr(dataStart, jsonString, "[")
+    dataEnd = FindMatchingBracket(jsonString, dataStart, "[", "]")
+    
+    Dim dataContent As String
+    dataContent = Mid$(jsonString, dataStart + 1, dataEnd - dataStart - 1)
+    
+    ' Parse each data object
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(dataContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, dataContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(dataContent, objectStart, "{", "}")
+        
+        Dim rowObj As String
+        rowObj = Mid$(dataContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        ' Parse the row object into a dictionary
+        Dim rowData As Object
+        Set rowData = ParseRowObject(rowObj)
+        
+        dataRows.Add rowData
+        
+        pos = objectEnd + 1
+    Loop
+    
+    Set ParseData = dataRows
+End Function
+
+'@Description("Parses a single row object into a dictionary")
+Private Function ParseRowObject(ByVal rowJson As String) As Object
+    Dim rowData As Object
+    Set rowData = CreateObject("Scripting.Dictionary")
+    
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(rowJson)
+        ' Find next field name
+        Dim nameStart As Long
+        Dim nameEnd As Long
+        
+        nameStart = InStr(pos, rowJson, """")
+        If nameStart = 0 Then Exit Do
+        
+        nameEnd = InStr(nameStart + 1, rowJson, """")
+        If nameEnd = 0 Then Exit Do
+        
+        Dim fieldName As String
+        fieldName = Mid$(rowJson, nameStart + 1, nameEnd - nameStart - 1)
+        
+        ' Find the colon
+        Dim colonPos As Long
+        colonPos = InStr(nameEnd, rowJson, ":")
+        If colonPos = 0 Then Exit Do
+        
+        ' Find the value
+        Dim valueStart As Long
+        valueStart = colonPos + 1
+        
+        ' Skip whitespace
+        Do While valueStart <= Len(rowJson) And Mid$(rowJson, valueStart, 1) = " "
+            valueStart = valueStart + 1
+        Loop
+        
+        ' Parse the value
+        Dim value As Variant
+        Dim valueEnd As Long
+        
+        Select Case Mid$(rowJson, valueStart, 1)
+            Case """"
+                ' String value
+                valueEnd = InStr(valueStart + 1, rowJson, """")
+                value = UnescapeJsonString(Mid$(rowJson, valueStart + 1, valueEnd - valueStart - 1))
+                pos = valueEnd + 1
+                
+            Case "{"
+                ' Object (not supported in simple schema)
+                valueEnd = FindMatchingBracket(rowJson, valueStart, "{", "}")
+                value = Null
+                pos = valueEnd + 1
+                
+            Case "["
+                ' Array (not supported in simple schema)
+                valueEnd = FindMatchingBracket(rowJson, valueStart, "[", "]")
+                value = Null
+                pos = valueEnd + 1
+                
+            Case "t", "f"
+                ' Boolean
+                If Mid$(rowJson, valueStart, 4) = "true" Then
+                    value = True
+                    pos = valueStart + 4
+                ElseIf Mid$(rowJson, valueStart, 5) = "false" Then
+                    value = False
+                    pos = valueStart + 5
+                End If
+                
+            Case "n"
+                ' null
+                If Mid$(rowJson, valueStart, 4) = "null" Then
+                    value = Null
+                    pos = valueStart + 4
+                End If
+                
+            Case Else
+                ' Number - find the end of the number
+                valueEnd = valueStart
+                Do While valueEnd <= Len(rowJson)
+                    Dim ch As String
+                    ch = Mid$(rowJson, valueEnd, 1)
+                    If ch = "," Or ch = "}" Or ch = " " Or ch = vbCr Or ch = vbLf Then
+                        Exit Do
+                    End If
+                    valueEnd = valueEnd + 1
+                Loop
+                
+                Dim numStr As String
+                numStr = Trim$(Mid$(rowJson, valueStart, valueEnd - valueStart))
+                
+                If InStr(numStr, ".") > 0 Then
+                    value = CDbl(numStr)
+                Else
+                    value = CLng(numStr)
+                End If
+                pos = valueEnd
+        End Select
+        
+        rowData(fieldName) = value
+        
+        ' Find next comma or end
+        Dim commaPos As Long
+        commaPos = InStr(pos, rowJson, ",")
+        If commaPos > 0 Then
+            pos = commaPos + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    
+    Set ParseRowObject = rowData
+End Function
+
+'@Description("Finds the matching closing bracket")
+Private Function FindMatchingBracket(ByVal text As String, ByVal startPos As Long, _
+                                    ByVal openChar As String, ByVal closeChar As String) As Long
+    Dim pos As Long
+    Dim depth As Long
+    Dim inString As Boolean
+    Dim escapeNext As Boolean
+    
+    pos = startPos + 1
+    depth = 1
+    inString = False
+    escapeNext = False
+    
+    Do While pos <= Len(text) And depth > 0
+        Dim ch As String
+        ch = Mid$(text, pos, 1)
+        
+        If escapeNext Then
+            escapeNext = False
+        ElseIf ch = "\" Then
+            escapeNext = True
+        ElseIf ch = """" And Not escapeNext Then
+            inString = Not inString
+        ElseIf Not inString Then
+            If ch = openChar Then
+                depth = depth + 1
+            ElseIf ch = closeChar Then
+                depth = depth - 1
+            End If
+        End If
+        
+        pos = pos + 1
+    Loop
+    
+    FindMatchingBracket = pos - 1
+End Function
+
+'@Description("Extracts a value from a JSON object string")
+Private Function ExtractJsonValue(ByVal jsonObj As String, ByVal key As String) As String
+    Dim keyPos As Long
+    keyPos = InStr(jsonObj, """" & key & """")
+    
+    If keyPos = 0 Then
+        ExtractJsonValue = ""
+        Exit Function
+    End If
+    
+    Dim colonPos As Long
+    colonPos = InStr(keyPos, jsonObj, ":")
+    
+    Dim valueStart As Long
+    valueStart = InStr(colonPos, jsonObj, """")
+    
+    Dim valueEnd As Long
+    valueEnd = InStr(valueStart + 1, jsonObj, """")
+    
+    ExtractJsonValue = Mid$(jsonObj, valueStart + 1, valueEnd - valueStart - 1)
+End Function
+
+'@Description("Unescapes JSON string special characters")
+Private Function UnescapeJsonString(ByVal text As String) As String
+    Dim result As String
+    result = text
+    
+    ' Replace escape sequences
+    result = Replace(result, "\""", """")
+    result = Replace(result, "\\", "\")
+    result = Replace(result, "\/", "/")
+    result = Replace(result, "\b", vbBack)
+    result = Replace(result, "\f", vbFormFeed)
+    result = Replace(result, "\n", vbLf)
+    result = Replace(result, "\r", vbCr)
+    result = Replace(result, "\t", vbTab)
+    
+    ' Handle Unicode escapes \uXXXX
+    Dim pos As Long
+    pos = InStr(result, "\u")
+    
+    While pos > 0
+        If pos + 5 <= Len(result) Then
+            Dim hexCode As String
+            hexCode = Mid$(result, pos + 2, 4)
+            
+            If IsHex(hexCode) Then
+                Dim charCode As Long
+                charCode = CLng("&H" & hexCode)
+                result = Left$(result, pos - 1) & ChrW$(charCode) & Mid$(result, pos + 6)
+            End If
+        End If
+        
+        pos = InStr(pos + 1, result, "\u")
+    Wend
+    
+    UnescapeJsonString = result
+End Function
+
+'@Description("Checks if a string is valid hexadecimal")
+Private Function IsHex(ByVal text As String) As Boolean
+    Dim i As Long
+    For i = 1 To Len(text)
+        Dim ch As String
+        ch = Mid$(text, i, 1)
+        If Not ((ch >= "0" And ch <= "9") Or _
+                (ch >= "A" And ch <= "F") Or _
+                (ch >= "a" And ch <= "f")) Then
+            IsHex = False
+            Exit Function
+        End If
+    Next i
+    IsHex = True
+End Function
+
+'@Description("Parses ISO date string to Date value")
+Private Function ParseISODate(ByVal isoDate As String) As Date
+    ' Handle ISO 8601 format: yyyy-mm-ddThh:nn:ss
+    Dim cleanDate As String
+    cleanDate = Replace(isoDate, "T", " ")
+    cleanDate = Replace(cleanDate, "Z", "")
+    
+    ' Remove milliseconds if present
+    Dim dotPos As Long
+    dotPos = InStr(cleanDate, ".")
+    If dotPos > 0 Then
+        cleanDate = Left$(cleanDate, dotPos - 1)
+    End If
+    
+    On Error Resume Next
+    ParseISODate = CDate(cleanDate)
+    If Err.Number <> 0 Then
+        ParseISODate = Now() ' Default to current date if parsing fails
+    End If
+    On Error GoTo 0
+End Function
+
+'@Description("Example usage with ADODB recordset")
+Public Sub TestJSONToRecordset()
+    Dim jsonString As String
+    jsonString = "{" & _
+        """fields"": [" & _
+        "  {""name"": ""CustomerID"", ""type"": ""string""}," & _
+        "  {""name"": ""CompanyName"", ""type"": ""string""}," & _
+        "  {""name"": ""OrderCount"", ""type"": ""integer""}," & _
+        "  {""name"": ""IsActive"", ""type"": ""boolean""}" & _
+        "]," & _
+        """data"": [" & _
+        "  {""CustomerID"": ""ALFKI"", ""CompanyName"": ""Alfreds Futterkiste"", ""OrderCount"": 6, ""IsActive"": true}," & _
+        "  {""CustomerID"": ""ANATR"", ""CompanyName"": ""Ana Trujillo"", ""OrderCount"": 4, ""IsActive"": false}" & _
+        "]" & _
+        "}"
+    
+    Dim rs As ADODB.Recordset
+    Set rs = JSONToRecordset(jsonString)
+    
+    ' Display the results
+    Do While Not rs.EOF
+        Debug.Print rs!CustomerID, rs!CompanyName, rs!OrderCount, rs!IsActive
+        rs.MoveNext
+    Loop
+    
+    ' Can also use it like a DAO recordset for most operations
+    rs.MoveFirst
+    Debug.Print "Record count: " & rs.RecordCount
+    
+    ' Can update values
+    rs!OrderCount = 10
+    rs.Update
+    
+    ' Can filter
+    rs.Filter = "IsActive = true"
+    
+    ' Can sort
+    rs.Sort = "CompanyName ASC"
+    
+    rs.Close
+    Set rs = Nothing
+End Sub
+
+'@Description("Helper function to convert ADODB recordset to array for binding")
+Public Function RecordsetToArray(rs As ADODB.Recordset) As Variant
+    If rs.RecordCount = 0 Then
+        RecordsetToArray = Empty
+        Exit Function
+    End If
+    
+    rs.MoveFirst
+    RecordsetToArray = rs.GetRows()
+End Function
+
+'@Description("Saves a disconnected ADODB recordset to a permanent Access table")
+Public Function SaveRecordsetToTable(ByVal rs As ADODB.Recordset, ByVal tableName As String) As Boolean
+    On Error GoTo ErrorHandler
+    
+    ' Validate inputs
+    If rs Is Nothing Then
+        SaveRecordsetToTable = False
+        Exit Function
+    End If
+    
+    If rs.State <> adStateOpen Then
+        SaveRecordsetToTable = False
+        Exit Function
+    End If
+    
+    If Len(Trim(tableName)) = 0 Then
+        SaveRecordsetToTable = False
+        Exit Function
+    End If
+    
+    Dim db As DAO.Database
+    Set db = CurrentDb()
+    
+    ' Check if table exists
+    Dim lvTableExists As Boolean
+    lvTableExists = TableExists(tableName, db)
+    
+    ' If table doesn't exist, create it
+    If Not lvTableExists Then
+        If Not CreateTableFromRecordset(rs, tableName, db) Then
+            SaveRecordsetToTable = False
+            GoTo Cleanup
+        End If
+    Else
+        ' If table exists, verify structure compatibility
+        If Not VerifyTableStructure(rs, tableName, db) Then
+            ' Structure doesn't match - could either fail or try to adapt
+            ' For safety, we'll fail rather than potentially lose data
+            SaveRecordsetToTable = False
+            GoTo Cleanup
+        End If
+    End If
+    
+    ' Save records to the table
+    If Not AppendRecordsToTable(rs, tableName, db) Then
+        SaveRecordsetToTable = False
+        GoTo Cleanup
+    End If
+    
+    ' Success
+    SaveRecordsetToTable = True
+    
+Cleanup:
+    Set db = Nothing
+    Exit Function
+    
+ErrorHandler:
+    SaveRecordsetToTable = False
+    Set db = Nothing
+End Function
+
+'@Description("Checks if a table exists in the database")
+Private Function TableExists(ByVal tableName As String, ByVal db As DAO.Database) As Boolean
+    On Error Resume Next
+    Dim tdf As DAO.TableDef
+    Set tdf = db.TableDefs(tableName)
+    TableExists = (Err.Number = 0)
+    Set tdf = Nothing
+    Err.Clear
+End Function
+
+'@Description("Creates a new table based on ADODB recordset structure")
+Private Function CreateTableFromRecordset(ByVal rs As ADODB.Recordset, _
+                                         ByVal tableName As String, _
+                                         ByVal db As DAO.Database) As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim tdf As DAO.TableDef
+    Set tdf = db.CreateTableDef(tableName)
+    
+    Dim adoField As ADODB.field
+    Dim daoField As DAO.field
+    
+    ' Create DAO fields based on ADODB fields
+    For Each adoField In rs.fields
+        Set daoField = CreateDAOField(adoField, tdf)
+        If Not daoField Is Nothing Then
+            tdf.fields.Append daoField
+        End If
+    Next adoField
+    
+    ' Append the table to the database
+    db.TableDefs.Append tdf
+    
+    CreateTableFromRecordset = True
+    Exit Function
+    
+ErrorHandler:
+    CreateTableFromRecordset = False
+End Function
+
+'@Description("Creates a DAO field based on an ADODB field")
+Private Function CreateDAOField(ByVal adoField As ADODB.field, _
+                               ByVal tdf As DAO.TableDef) As DAO.field
+    On Error GoTo ErrorHandler
+    
+    Dim daoField As DAO.field
+    Dim daoType As Long
+    Dim fieldSize As Long
+    
+    ' Map ADODB data type to DAO data type
+    Select Case adoField.Type
+        Case adBoolean
+            daoType = dbBoolean
+            fieldSize = 0
+            
+        Case adTinyInt, adSmallInt, adInteger
+            daoType = dbLong
+            fieldSize = 0
+            
+        Case adBigInt
+            daoType = dbLong
+            fieldSize = 0
+            
+        Case adSingle
+            daoType = dbSingle
+            fieldSize = 0
+            
+        Case adDouble
+            daoType = dbDouble
+            fieldSize = 0
+            
+        Case adCurrency
+            daoType = dbCurrency
+            fieldSize = 0
+            
+        Case adDecimal, adNumeric
+            daoType = dbDouble
+            fieldSize = 0
+            
+        Case adDate, adDBDate, adDBTime, adDBTimeStamp
+            daoType = dbDate
+            fieldSize = 0
+            
+        Case adChar, adVarChar, adWChar, adVarWChar
+            daoType = dbText
+            fieldSize = IIf(adoField.DefinedSize > 255, 255, adoField.DefinedSize)
+            If fieldSize = 0 Then fieldSize = 255
+            
+        Case adLongVarChar, adLongVarWChar
+            daoType = dbMemo
+            fieldSize = 0
+            
+        Case adBinary, adVarBinary
+            daoType = dbBinary
+            fieldSize = IIf(adoField.DefinedSize > 510, 510, adoField.DefinedSize)
+            
+        Case adLongVarBinary
+            daoType = dbLongBinary
+            fieldSize = 0
+            
+        Case adGUID
+            daoType = dbText
+            fieldSize = 38
+            
+        Case Else
+            ' Default to text
+            daoType = dbText
+            fieldSize = 255
+    End Select
+    
+    ' Create the field
+    If fieldSize > 0 Then
+        Set daoField = tdf.CreateField(adoField.Name, daoType, fieldSize)
+    Else
+        Set daoField = tdf.CreateField(adoField.Name, daoType)
+    End If
+    
+    ' Set field properties
+    daoField.Required = False  ' Allow nulls for flexibility
+    
+    If daoType = dbText Then
+        daoField.AllowZeroLength = True
+    End If
+    
+    Set CreateDAOField = daoField
+    Exit Function
+    
+ErrorHandler:
+    Set CreateDAOField = Nothing
+End Function
+
+'@Description("Verifies that table structure is compatible with recordset")
+Private Function VerifyTableStructure(ByVal rs As ADODB.Recordset, _
+                                     ByVal tableName As String, _
+                                     ByVal db As DAO.Database) As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim tdf As DAO.TableDef
+    Set tdf = db.TableDefs(tableName)
+    
+    Dim adoField As ADODB.field
+    Dim daoField As DAO.field
+    
+    ' Check if all recordset fields exist in the table
+    For Each adoField In rs.fields
+        On Error Resume Next
+        Set daoField = tdf.fields(adoField.Name)
+        If Err.Number <> 0 Then
+            ' Field doesn't exist in table
+            VerifyTableStructure = False
+            Exit Function
+        End If
+        On Error GoTo ErrorHandler
+    Next adoField
+    
+    VerifyTableStructure = True
+    Exit Function
+    
+ErrorHandler:
+    VerifyTableStructure = False
+End Function
+
+'@Description("Appends records from ADODB recordset to Access table")
+Private Function AppendRecordsToTable(ByVal rs As ADODB.Recordset, _
+                                     ByVal tableName As String, _
+                                     ByVal db As DAO.Database) As Boolean
+    On Error GoTo ErrorHandler
+    
+    ' If recordset is empty, nothing to do but still successful
+    If rs.RecordCount = 0 Then
+        AppendRecordsToTable = True
+        Exit Function
+    End If
+    
+    ' Open DAO recordset for the table
+    Dim daoRS As DAO.Recordset
+    Set daoRS = db.OpenRecordset(tableName, dbOpenDynaset)
+    
+    ' Move to first record in ADODB recordset
+    rs.MoveFirst
+    
+    ' Copy records
+    Dim adoField As ADODB.field
+    Dim fieldName As String
+    Dim fieldValue As Variant
+    
+    Do While Not rs.EOF
+        daoRS.AddNew
+        
+        For Each adoField In rs.fields
+            fieldName = adoField.Name
+            fieldValue = adoField.value
+            
+            ' Check if field exists in DAO recordset
+            On Error Resume Next
+            If Not IsNull(fieldValue) Then
+                daoRS.fields(fieldName).value = fieldValue
+            Else
+                daoRS.fields(fieldName).value = Null
+            End If
+            On Error GoTo ErrorHandler
+        Next adoField
+        
+        daoRS.Update
+        rs.MoveNext
+    Loop
+    
+    ' Clean up
+    daoRS.Close
+    Set daoRS = Nothing
+    
+    AppendRecordsToTable = True
+    Exit Function
+    
+ErrorHandler:
+    If Not daoRS Is Nothing Then
+        If daoRS.EditMode <> dbEditNone Then
+            daoRS.CancelUpdate
+        End If
+        daoRS.Close
+        Set daoRS = Nothing
+    End If
+    AppendRecordsToTable = False
+End Function
+
+'@Description("Alternative version that optionally clears existing data before appending")
+Public Function SaveRecordsetToTableWithOptions(ByVal rs As ADODB.Recordset, _
+                                               ByVal tableName As String, _
+                                               Optional ByVal clearExistingData As Boolean = False, _
+                                               Optional ByVal createBackup As Boolean = False) As Boolean
+    On Error GoTo ErrorHandler
+    
+    ' Validate inputs
+    If rs Is Nothing Or rs.State <> adStateOpen Or Len(Trim(tableName)) = 0 Then
+        SaveRecordsetToTableWithOptions = False
+        Exit Function
+    End If
+    
+    Dim db As DAO.Database
+    Set db = CurrentDb()
+    
+    ' Create backup if requested and table exists
+    If createBackup And TableExists(tableName, db) Then
+        Dim backupName As String
+        backupName = tableName & "_Backup_" & Format(Now(), "yyyymmdd_hhnnss")
+        db.Execute "SELECT * INTO [" & backupName & "] FROM [" & tableName & "]", dbFailOnError
+    End If
+    
+    ' Clear existing data if requested and table exists
+    If clearExistingData And TableExists(tableName, db) Then
+        db.Execute "DELETE FROM [" & tableName & "]", dbFailOnError
+    End If
+    
+    ' Use the main function to save the data
+    SaveRecordsetToTableWithOptions = SaveRecordsetToTable(rs, tableName)
+    
+    Set db = Nothing
+    Exit Function
+    
+ErrorHandler:
+    SaveRecordsetToTableWithOptions = False
+    Set db = Nothing
+End Function
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Attribute VB_Name = "RecordsetToJsonHelper"
+'@Description("Converts a DAO Recordset to JSON string following the simple schema format")
+Public Function RecordsetToJSON(ByVal rs As DAO.Recordset) As String
+    Dim sb As StringBuilder
+    Set sb = StringBuilder.Create("{", 1024)
+    
+    ' Add fields array
+    sb.Append """fields"":["
+    
+    Dim fld As DAO.field
+    Dim fieldIndex As Long
+    fieldIndex = 0
+    
+    ' Build fields array
+    For Each fld In rs.fields
+        If fieldIndex > 0 Then sb.Append ","
+        
+        sb.Append "{"
+        sb.Append """name"":""" & EscapeJsonString(fld.Name) & ""","
+        sb.Append """type"":""" & GetJsonDataType(fld.Type) & """"
+        sb.Append "}"
+        
+        fieldIndex = fieldIndex + 1
+    Next fld
+    
+    sb.Append "],"
+    
+    ' Add data array
+    sb.Append """data"":["
+    
+    ' Move to first record if not at BOF
+    If Not rs.BOF And Not rs.EOF Then
+        rs.MoveFirst
+    End If
+    
+    Dim rowIndex As Long
+    rowIndex = 0
+    
+    ' Build data array
+    Do While Not rs.EOF
+        If rowIndex > 0 Then sb.Append ","
+        
+        sb.Append "{"
+        
+        fieldIndex = 0
+        For Each fld In rs.fields
+            If fieldIndex > 0 Then sb.Append ","
+            
+            sb.Append """" & EscapeJsonString(fld.Name) & """:"
+            sb.Append FormatFieldValue(fld)
+            
+            fieldIndex = fieldIndex + 1
+        Next fld
+        
+        sb.Append "}"
+        
+        rowIndex = rowIndex + 1
+        rs.MoveNext
+    Loop
+    
+    sb.Append "]"
+    sb.Append "}"
+    
+    RecordsetToJSON = sb.ToString()
+End Function
+
+'@Description("Maps DAO field types to JSON schema data types")
+Private Function GetJsonDataType(ByVal daoType As Long) As String
+    Select Case daoType
+        Case dbBoolean
+            GetJsonDataType = "boolean"
+        Case dbByte, dbInteger, dbLong
+            GetJsonDataType = "integer"
+        Case dbSingle, dbDouble
+            GetJsonDataType = "number"
+        Case dbCurrency, dbDecimal, dbNumeric
+            GetJsonDataType = "decimal"
+        Case dbDate, dbTime
+            GetJsonDataType = "datetime"
+        Case dbText, dbChar
+            GetJsonDataType = "string"
+        Case dbMemo, dbLongBinary
+            GetJsonDataType = "text"
+        Case dbBinary, dbVarBinary
+            GetJsonDataType = "binary"
+        Case dbGUID
+            GetJsonDataType = "string"
+        Case Else
+            GetJsonDataType = "string"
+    End Select
+End Function
+
+'@Description("Formats a field value as JSON")
+Private Function FormatFieldValue(ByVal fld As DAO.field) As String
+    ' Handle NULL values
+    If IsNull(fld.value) Then
+        FormatFieldValue = "null"
+        Exit Function
+    End If
+    
+    ' Format based on data type
+    Select Case fld.Type
+        Case dbBoolean
+            FormatFieldValue = IIf(fld.value, "true", "false")
+            
+        Case dbByte, dbInteger, dbLong, dbSingle, dbDouble, dbCurrency, dbDecimal, dbNumeric
+            ' Numbers don't need quotes
+            FormatFieldValue = CStr(fld.value)
+            
+        Case dbDate, dbTime
+            ' Format dates as ISO 8601 strings
+            If IsDate(fld.value) Then
+                FormatFieldValue = """" & Format$(fld.value, "yyyy-mm-dd\Thh:nn:ss") & """"
+            Else
+                FormatFieldValue = "null"
+            End If
+            
+        Case dbText, dbMemo, dbChar, dbGUID
+            ' Strings need quotes and escaping
+            FormatFieldValue = """" & EscapeJsonString(CStr(fld.value)) & """"
+            
+        Case dbBinary, dbLongBinary, dbVarBinary
+            ' Binary data - convert to base64 or hex string
+            ' For simplicity, marking as empty string
+            FormatFieldValue = """"""""
+            
+        Case Else
+            ' Default to string
+            FormatFieldValue = """" & EscapeJsonString(CStr(fld.value)) & """"
+    End Select
+End Function
+
+'@Description("Escapes special characters in a string for JSON")
+Private Function EscapeJsonString(ByVal text As String) As String
+    Dim result As String
+    result = text
+    
+    ' Replace backslashes first (must be done before other escapes)
+    result = Replace(result, "\", "\\")
+    
+    ' Replace other special characters
+    result = Replace(result, """", "\""")
+    result = Replace(result, "/", "\/")
+    result = Replace(result, vbBack, "\b")
+    result = Replace(result, vbFormFeed, "\f")
+    result = Replace(result, vbLf, "\n")
+    result = Replace(result, vbCr, "\r")
+    result = Replace(result, vbTab, "\t")
+    
+    ' Handle other control characters (0x00-0x1F)
+    Dim i As Long
+    Dim char As String
+    Dim charCode As Long
+    Dim escapedResult As String
+    escapedResult = ""
+    
+    For i = 1 To Len(result)
+        char = Mid$(result, i, 1)
+        charCode = AscW(char)
+        
+        If charCode < 32 And charCode <> 8 And charCode <> 9 And charCode <> 10 And charCode <> 12 And charCode <> 13 Then
+            ' Control character that needs Unicode escape
+            escapedResult = escapedResult & "\u" & Right$("0000" & Hex$(charCode), 4)
+        Else
+            escapedResult = escapedResult & char
+        End If
+    Next i
+    
+    EscapeJsonString = escapedResult
+End Function
+
+'@Description("Alternative version with pretty printing option")
+Public Function RecordsetToJSONPretty(ByVal rs As DAO.Recordset, Optional ByVal indent As Boolean = True) As String
+    Dim sb As StringBuilder
+    Set sb = StringBuilder.Create("{", 1024)
+    Dim newLine As String
+    Dim lvTab As String
+    
+    If indent Then
+        newLine = vbCrLf
+        lvTab = "  "
+    Else
+        newLine = ""
+        lvTab = ""
+    End If
+    
+    ' Add fields array
+    sb.Append newLine & lvTab & """fields"": ["
+    
+    Dim fld As DAO.field
+    Dim fieldIndex As Long
+    fieldIndex = 0
+    
+    ' Build fields array
+    For Each fld In rs.fields
+        If fieldIndex > 0 Then sb.Append ","
+        
+        sb.Append newLine & lvTab & lvTab & "{"
+        sb.Append newLine & lvTab & lvTab & lvTab & """name"": """ & EscapeJsonString(fld.Name) & ""","
+        sb.Append newLine & lvTab & lvTab & lvTab & """type"": """ & GetJsonDataType(fld.Type) & """"
+        sb.Append newLine & lvTab & lvTab & "}"
+        
+        fieldIndex = fieldIndex + 1
+    Next fld
+    
+    sb.Append newLine & lvTab & "],"
+    
+    ' Add data array
+    sb.Append newLine & lvTab & """data"": ["
+    
+    ' Move to first record if not at BOF
+    If Not rs.BOF And Not rs.EOF Then
+        rs.MoveFirst
+    End If
+    
+    Dim rowIndex As Long
+    rowIndex = 0
+    
+    ' Build data array
+    Do While Not rs.EOF
+        If rowIndex > 0 Then sb.Append ","
+        
+        sb.Append newLine & lvTab & lvTab & "{"
+        
+        fieldIndex = 0
+        For Each fld In rs.fields
+            If fieldIndex > 0 Then sb.Append ","
+            
+            sb.Append newLine & lvTab & lvTab & lvTab & """" & EscapeJsonString(fld.Name) & """: "
+            sb.Append FormatFieldValue(fld)
+            
+            fieldIndex = fieldIndex + 1
+        Next fld
+        
+        sb.Append newLine & lvTab & lvTab & "}"
+        
+        rowIndex = rowIndex + 1
+        rs.MoveNext
+    Loop
+    
+    sb.Append newLine & lvTab & "]"
+    sb.Append newLine & "}"
+    
+    RecordsetToJSONPretty = sb.ToString()
+End Function
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Attribute VB_Name = "JsonValidationHelper"
+Option Compare Database
+Option Explicit
+
+'@Description("Validates that a JSON string complies with the DAO Recordset JSON Schema")
+Public Function ValidateJSON(ByVal jsonString As String, _
+                            Optional ByRef errorMessage As String = "") As Boolean
+    On Error GoTo ErrorHandler
+    
+    ' Clear any previous error message
+    errorMessage = ""
+    
+    ' Check for empty or null input
+    If Len(Trim(jsonString)) = 0 Then
+        errorMessage = "JSON string is empty"
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' Check basic JSON structure (must start with { and end with })
+    Dim trimmedJson As String
+    trimmedJson = Trim(jsonString)
+    
+    If Left(trimmedJson, 1) <> "{" Or Right(trimmedJson, 1) <> "}" Then
+        errorMessage = "JSON must be an object (start with { and end with })"
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' Validate required top-level properties
+    If Not ValidateRequiredProperties(jsonString, errorMessage) Then
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' Validate fields array structure
+    If Not ValidateFieldsArray(jsonString, errorMessage) Then
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' Validate data array structure
+    If Not ValidateDataArray(jsonString, errorMessage) Then
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' Cross-validate that data objects use only defined field names
+    If Not ValidateDataFieldNames(jsonString, errorMessage) Then
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' Optional: Validate data types match field definitions
+    If Not ValidateDataTypes(jsonString, errorMessage) Then
+        ValidateJSON = False
+        Exit Function
+    End If
+    
+    ' All validations passed
+    ValidateJSON = True
+    Exit Function
+    
+ErrorHandler:
+    errorMessage = "Validation error: " & Err.Description
+    ValidateJSON = False
+End Function
+
+'@Description("Validates that required top-level properties exist")
+Private Function ValidateRequiredProperties(ByVal jsonString As String, _
+                                           ByRef errorMessage As String) As Boolean
+    
+    ' Check for "fields" property
+    If InStr(jsonString, """fields""") = 0 Then
+        errorMessage = "Missing required property: 'fields'"
+        ValidateRequiredProperties = False
+        Exit Function
+    End If
+    
+    ' Check for "data" property
+    If InStr(jsonString, """data""") = 0 Then
+        errorMessage = "Missing required property: 'data'"
+        ValidateRequiredProperties = False
+        Exit Function
+    End If
+    
+    ValidateRequiredProperties = True
+End Function
+
+'@Description("Validates the fields array structure")
+Private Function ValidateFieldsArray(ByVal jsonString As String, _
+                                    ByRef errorMessage As String) As Boolean
+    On Error GoTo ValidationError
+    
+    ' Extract fields array content
+    Dim fieldsStart As Long
+    Dim fieldsEnd As Long
+    
+    fieldsStart = InStr(jsonString, """fields""")
+    fieldsStart = InStr(fieldsStart, jsonString, "[")
+    
+    If fieldsStart = 0 Then
+        errorMessage = "'fields' must be an array"
+        ValidateFieldsArray = False
+        Exit Function
+    End If
+    
+    fieldsEnd = FindMatchingBracket(jsonString, fieldsStart, "[", "]")
+    
+    Dim fieldsContent As String
+    fieldsContent = Mid$(jsonString, fieldsStart + 1, fieldsEnd - fieldsStart - 1)
+    
+    ' Check if fields array is empty
+    If Len(Trim(fieldsContent)) = 0 Then
+        errorMessage = "'fields' array cannot be empty"
+        ValidateFieldsArray = False
+        Exit Function
+    End If
+    
+    ' Parse and validate each field object
+    Dim pos As Long
+    Dim fieldCount As Long
+    pos = 1
+    fieldCount = 0
+    
+    Do While pos < Len(fieldsContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, fieldsContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(fieldsContent, objectStart, "{", "}")
+        
+        Dim fieldObj As String
+        fieldObj = Mid$(fieldsContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        ' Validate field object has required properties
+        If Not ValidateFieldObject(fieldObj, fieldCount + 1, errorMessage) Then
+            ValidateFieldsArray = False
+            Exit Function
+        End If
+        
+        fieldCount = fieldCount + 1
+        pos = objectEnd + 1
+    Loop
+    
+    If fieldCount = 0 Then
+        errorMessage = "'fields' array must contain at least one field definition"
+        ValidateFieldsArray = False
+        Exit Function
+    End If
+    
+    ValidateFieldsArray = True
+    Exit Function
+    
+ValidationError:
+    errorMessage = "Error validating fields array: " & Err.Description
+    ValidateFieldsArray = False
+End Function
+
+'@Description("Validates individual field object structure")
+Private Function ValidateFieldObject(ByVal fieldObj As String, _
+                                    ByVal fieldIndex As Long, _
+                                    ByRef errorMessage As String) As Boolean
+    
+    ' Check for "name" property
+    If InStr(fieldObj, """name""") = 0 Then
+        errorMessage = "Field at index " & fieldIndex & " missing required property: 'name'"
+        ValidateFieldObject = False
+        Exit Function
+    End If
+    
+    ' Check for "type" property
+    If InStr(fieldObj, """type""") = 0 Then
+        errorMessage = "Field at index " & fieldIndex & " missing required property: 'type'"
+        ValidateFieldObject = False
+        Exit Function
+    End If
+    
+    ' Extract and validate type value
+    Dim typeValue As String
+    typeValue = ExtractJsonValue(fieldObj, "type")
+    
+    If Not IsValidDataType(typeValue) Then
+        errorMessage = "Field at index " & fieldIndex & " has invalid type: '" & typeValue & "'"
+        ValidateFieldObject = False
+        Exit Function
+    End If
+    
+    ' Extract and validate name value
+    Dim nameValue As String
+    nameValue = ExtractJsonValue(fieldObj, "name")
+    
+    If Len(Trim(nameValue)) = 0 Then
+        errorMessage = "Field at index " & fieldIndex & " has empty name"
+        ValidateFieldObject = False
+        Exit Function
+    End If
+    
+    ValidateFieldObject = True
+End Function
+
+'@Description("Checks if a data type is valid according to schema")
+Private Function IsValidDataType(ByVal dataType As String) As Boolean
+    Select Case LCase(dataType)
+        Case "string", "number", "integer", "boolean", _
+             "date", "datetime", "decimal", "text", "binary"
+            IsValidDataType = True
+        Case Else
+            IsValidDataType = False
+    End Select
+End Function
+
+'@Description("Validates the data array structure")
+Private Function ValidateDataArray(ByVal jsonString As String, _
+                                  ByRef errorMessage As String) As Boolean
+    On Error GoTo ValidationError
+    
+    ' Extract data array content
+    Dim dataStart As Long
+    Dim dataEnd As Long
+    
+    dataStart = InStr(jsonString, """data""")
+    dataStart = InStr(dataStart, jsonString, "[")
+    
+    If dataStart = 0 Then
+        errorMessage = "'data' must be an array"
+        ValidateDataArray = False
+        Exit Function
+    End If
+    
+    dataEnd = FindMatchingBracket(jsonString, dataStart, "[", "]")
+    
+    Dim dataContent As String
+    dataContent = Mid$(jsonString, dataStart + 1, dataEnd - dataStart - 1)
+    
+    ' Empty data array is valid
+    If Len(Trim(dataContent)) = 0 Then
+        ValidateDataArray = True
+        Exit Function
+    End If
+    
+    ' Validate each data object is properly formed
+    Dim pos As Long
+    Dim rowCount As Long
+    pos = 1
+    rowCount = 0
+    
+    Do While pos < Len(dataContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, dataContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(dataContent, objectStart, "{", "}")
+        
+        If objectEnd = 0 Then
+            errorMessage = "Malformed object in data array at row " & (rowCount + 1)
+            ValidateDataArray = False
+            Exit Function
+        End If
+        
+        rowCount = rowCount + 1
+        pos = objectEnd + 1
+    Loop
+    
+    ValidateDataArray = True
+    Exit Function
+    
+ValidationError:
+    errorMessage = "Error validating data array: " & Err.Description
+    ValidateDataArray = False
+End Function
+
+'@Description("Validates that data objects only use defined field names")
+Private Function ValidateDataFieldNames(ByVal jsonString As String, _
+                                       ByRef errorMessage As String) As Boolean
+    On Error GoTo ValidationError
+    
+    ' First, collect all defined field names
+    Dim definedFields As Collection
+    Set definedFields = GetDefinedFieldNames(jsonString)
+    
+    If definedFields.Count = 0 Then
+        errorMessage = "No field definitions found"
+        ValidateDataFieldNames = False
+        Exit Function
+    End If
+    
+    ' Extract data array
+    Dim dataStart As Long
+    Dim dataEnd As Long
+    
+    dataStart = InStr(jsonString, """data""")
+    dataStart = InStr(dataStart, jsonString, "[")
+    dataEnd = FindMatchingBracket(jsonString, dataStart, "[", "]")
+    
+    Dim dataContent As String
+    dataContent = Mid$(jsonString, dataStart + 1, dataEnd - dataStart - 1)
+    
+    ' Check each data object
+    Dim pos As Long
+    Dim rowIndex As Long
+    pos = 1
+    rowIndex = 0
+    
+    Do While pos < Len(dataContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, dataContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(dataContent, objectStart, "{", "}")
+        
+        Dim rowObj As String
+        rowObj = Mid$(dataContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        ' Extract field names from this data object
+        Dim dataFieldNames As Collection
+        Set dataFieldNames = ExtractFieldNamesFromObject(rowObj)
+        
+        ' Validate each field name exists in defined fields
+        Dim fieldName As Variant
+        For Each fieldName In dataFieldNames
+            If Not IsFieldDefined(CStr(fieldName), definedFields) Then
+                errorMessage = "Row " & (rowIndex + 1) & " contains undefined field: '" & fieldName & "'"
+                ValidateDataFieldNames = False
+                Exit Function
+            End If
+        Next fieldName
+        
+        rowIndex = rowIndex + 1
+        pos = objectEnd + 1
+    Loop
+    
+    ValidateDataFieldNames = True
+    Exit Function
+    
+ValidationError:
+    errorMessage = "Error validating field names: " & Err.Description
+    ValidateDataFieldNames = False
+End Function
+
+'@Description("Gets all defined field names from the fields array")
+Private Function GetDefinedFieldNames(ByVal jsonString As String) As Collection
+    Dim fields As New Collection
+    
+    ' Extract fields array
+    Dim fieldsStart As Long
+    Dim fieldsEnd As Long
+    
+    fieldsStart = InStr(jsonString, """fields""")
+    fieldsStart = InStr(fieldsStart, jsonString, "[")
+    fieldsEnd = FindMatchingBracket(jsonString, fieldsStart, "[", "]")
+    
+    Dim fieldsContent As String
+    fieldsContent = Mid$(jsonString, fieldsStart + 1, fieldsEnd - fieldsStart - 1)
+    
+    ' Parse each field object
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(fieldsContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, fieldsContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(fieldsContent, objectStart, "{", "}")
+        
+        Dim fieldObj As String
+        fieldObj = Mid$(fieldsContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        Dim fieldName As String
+        fieldName = ExtractJsonValue(fieldObj, "name")
+        
+        If Len(fieldName) > 0 Then
+            fields.Add fieldName, fieldName
+        End If
+        
+        pos = objectEnd + 1
+    Loop
+    
+    Set GetDefinedFieldNames = fields
+End Function
+
+'@Description("Extracts field names from a data object")
+Private Function ExtractFieldNamesFromObject(ByVal objContent As String) As Collection
+    Dim fieldNames As New Collection
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(objContent)
+        ' Find next field name
+        Dim nameStart As Long
+        Dim nameEnd As Long
+        
+        nameStart = InStr(pos, objContent, """")
+        If nameStart = 0 Then Exit Do
+        
+        nameEnd = InStr(nameStart + 1, objContent, """")
+        If nameEnd = 0 Then Exit Do
+        
+        Dim fieldName As String
+        fieldName = Mid$(objContent, nameStart + 1, nameEnd - nameStart - 1)
+        
+        ' Add to collection if not already there
+        On Error Resume Next
+        fieldNames.Add fieldName, fieldName
+        On Error GoTo 0
+        
+        ' Find the colon and skip to next field
+        Dim colonPos As Long
+        colonPos = InStr(nameEnd, objContent, ":")
+        If colonPos = 0 Then Exit Do
+        
+        ' Skip the value to find next field
+        pos = SkipJsonValue(objContent, colonPos + 1)
+    Loop
+    
+    Set ExtractFieldNamesFromObject = fieldNames
+End Function
+
+'@Description("Skips over a JSON value to find the next position")
+Private Function SkipJsonValue(ByVal text As String, ByVal startPos As Long) As Long
+    Dim pos As Long
+    pos = startPos
+    
+    ' Skip whitespace
+    Do While pos <= Len(text) And Mid$(text, pos, 1) = " "
+        pos = pos + 1
+    Loop
+    
+    If pos > Len(text) Then
+        SkipJsonValue = pos
+        Exit Function
+    End If
+    
+    Select Case Mid$(text, pos, 1)
+        Case """"
+            ' String - find closing quote
+            pos = pos + 1
+            Do While pos <= Len(text)
+                If Mid$(text, pos, 1) = """" And Mid$(text, pos - 1, 1) <> "\" Then
+                    pos = pos + 1
+                    Exit Do
+                End If
+                pos = pos + 1
+            Loop
+            
+        Case "{"
+            ' Object - find closing brace
+            pos = FindMatchingBracket(text, pos, "{", "}") + 1
+            
+        Case "["
+            ' Array - find closing bracket
+            pos = FindMatchingBracket(text, pos, "[", "]") + 1
+            
+        Case "t"
+            ' true
+            pos = pos + 4
+            
+        Case "f"
+            ' false
+            pos = pos + 5
+            
+        Case "n"
+            ' null
+            pos = pos + 4
+            
+        Case Else
+            ' Number - continue until comma, space, or closing brace
+            Do While pos <= Len(text)
+                Dim ch As String
+                ch = Mid$(text, pos, 1)
+                If ch = "," Or ch = "}" Or ch = " " Or ch = vbCr Or ch = vbLf Then
+                    Exit Do
+                End If
+                pos = pos + 1
+            Loop
+    End Select
+    
+    SkipJsonValue = pos
+End Function
+
+'@Description("Checks if a field name is defined")
+Private Function IsFieldDefined(ByVal fieldName As String, _
+                               ByVal definedFields As Collection) As Boolean
+    On Error Resume Next
+    Dim temp As Variant
+    temp = definedFields(fieldName)
+    IsFieldDefined = (Err.Number = 0)
+    Err.Clear
+End Function
+
+'@Description("Validates that data values match their defined types")
+Private Function ValidateDataTypes(ByVal jsonString As String, _
+                                  ByRef errorMessage As String) As Boolean
+    ' This is optional and can be computationally expensive
+    ' Set to True to skip type validation for performance
+    Dim skipTypeValidation As Boolean
+    skipTypeValidation = False
+    
+    If skipTypeValidation Then
+        ValidateDataTypes = True
+        Exit Function
+    End If
+    
+    ' Build field type map
+    Dim fieldTypes As Object
+    Set fieldTypes = CreateObject("Scripting.Dictionary")
+    
+    Dim fields As Collection
+    Set fields = ParseFields(jsonString)
+    
+    Dim fieldInfo As Object
+    For Each fieldInfo In fields
+        fieldTypes(fieldInfo("name")) = fieldInfo("type")
+    Next fieldInfo
+    
+    ' Validate each data row
+    Dim dataRows As Collection
+    Set dataRows = ParseData(jsonString)
+    
+    Dim rowIndex As Long
+    Dim rowData As Object
+    
+    rowIndex = 0
+    For Each rowData In dataRows
+        rowIndex = rowIndex + 1
+        
+        Dim key As Variant
+        For Each key In rowData.Keys
+            Dim value As Variant
+            value = rowData(key)
+            
+            If fieldTypes.Exists(key) Then
+                If Not ValidateValueType(value, fieldTypes(key), key, rowIndex, errorMessage) Then
+                    ValidateDataTypes = False
+                    Exit Function
+                End If
+            End If
+        Next key
+    Next rowData
+    
+    ValidateDataTypes = True
+End Function
+
+'@Description("Validates that a value matches its expected type")
+Private Function ValidateValueType(ByVal value As Variant, _
+                                  ByVal expectedType As String, _
+                                  ByVal fieldName As String, _
+                                  ByVal rowIndex As Long, _
+                                  ByRef errorMessage As String) As Boolean
+    
+    ' Null values are always valid
+    If IsNull(value) Then
+        ValidateValueType = True
+        Exit Function
+    End If
+    
+    Select Case LCase(expectedType)
+        Case "boolean"
+            If VarType(value) <> vbBoolean Then
+                errorMessage = "Row " & rowIndex & ", field '" & fieldName & "': expected boolean, got " & TypeName(value)
+                ValidateValueType = False
+                Exit Function
+            End If
+            
+        Case "integer"
+            If Not IsNumeric(value) Then
+                errorMessage = "Row " & rowIndex & ", field '" & fieldName & "': expected integer, got " & TypeName(value)
+                ValidateValueType = False
+                Exit Function
+            End If
+            
+        Case "number", "decimal"
+            If Not IsNumeric(value) Then
+                errorMessage = "Row " & rowIndex & ", field '" & fieldName & "': expected number, got " & TypeName(value)
+                ValidateValueType = False
+                Exit Function
+            End If
+            
+        Case "date", "datetime"
+            If VarType(value) = vbString Then
+                ' Try to parse as date
+                If Not IsDate(value) And Not IsISODate(CStr(value)) Then
+                    errorMessage = "Row " & rowIndex & ", field '" & fieldName & "': invalid date format"
+                    ValidateValueType = False
+                    Exit Function
+                End If
+            ElseIf VarType(value) <> vbDate Then
+                errorMessage = "Row " & rowIndex & ", field '" & fieldName & "': expected date, got " & TypeName(value)
+                ValidateValueType = False
+                Exit Function
+            End If
+            
+        Case "string", "text", "binary"
+            ' Strings can be almost anything when parsed from JSON
+            ' So we're lenient here
+    End Select
+    
+    ValidateValueType = True
+End Function
+
+'@Description("Checks if a string is in ISO date format")
+Private Function IsISODate(ByVal dateStr As String) As Boolean
+    ' Basic check for ISO 8601 format: yyyy-mm-dd or yyyy-mm-ddThh:nn:ss
+    If Len(dateStr) < 10 Then
+        IsISODate = False
+        Exit Function
+    End If
+    
+    ' Check basic format
+    If Mid$(dateStr, 5, 1) = "-" And Mid$(dateStr, 8, 1) = "-" Then
+        IsISODate = True
+    Else
+        IsISODate = False
+    End If
+End Function
+
+'@Description("Helper functions from previous artifacts")
+Private Function FindMatchingBracket(ByVal text As String, ByVal startPos As Long, _
+                                    ByVal openChar As String, ByVal closeChar As String) As Long
+    Dim pos As Long
+    Dim depth As Long
+    Dim inString As Boolean
+    Dim escapeNext As Boolean
+    
+    pos = startPos + 1
+    depth = 1
+    inString = False
+    escapeNext = False
+    
+    Do While pos <= Len(text) And depth > 0
+        Dim ch As String
+        ch = Mid$(text, pos, 1)
+        
+        If escapeNext Then
+            escapeNext = False
+        ElseIf ch = "\" Then
+            escapeNext = True
+        ElseIf ch = """" And Not escapeNext Then
+            inString = Not inString
+        ElseIf Not inString Then
+            If ch = openChar Then
+                depth = depth + 1
+            ElseIf ch = closeChar Then
+                depth = depth - 1
+            End If
+        End If
+        
+        pos = pos + 1
+    Loop
+    
+    FindMatchingBracket = pos - 1
+End Function
+
+Private Function ExtractJsonValue(ByVal jsonObj As String, ByVal key As String) As String
+    Dim keyPos As Long
+    keyPos = InStr(jsonObj, """" & key & """")
+    
+    If keyPos = 0 Then
+        ExtractJsonValue = ""
+        Exit Function
+    End If
+    
+    Dim colonPos As Long
+    colonPos = InStr(keyPos, jsonObj, ":")
+    
+    Dim valueStart As Long
+    valueStart = InStr(colonPos, jsonObj, """")
+    
+    If valueStart = 0 Then
+        ExtractJsonValue = ""
+        Exit Function
+    End If
+    
+    Dim valueEnd As Long
+    valueEnd = InStr(valueStart + 1, jsonObj, """")
+    
+    ExtractJsonValue = Mid$(jsonObj, valueStart + 1, valueEnd - valueStart - 1)
+End Function
+
+Private Function ParseFields(ByVal jsonString As String) As Collection
+    Dim fields As New Collection
+    Dim fieldsStart As Long
+    Dim fieldsEnd As Long
+    
+    fieldsStart = InStr(jsonString, """fields""")
+    fieldsStart = InStr(fieldsStart, jsonString, "[")
+    fieldsEnd = FindMatchingBracket(jsonString, fieldsStart, "[", "]")
+    
+    Dim fieldsContent As String
+    fieldsContent = Mid$(jsonString, fieldsStart + 1, fieldsEnd - fieldsStart - 1)
+    
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(fieldsContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, fieldsContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(fieldsContent, objectStart, "{", "}")
+        
+        Dim fieldObj As String
+        fieldObj = Mid$(fieldsContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        Dim fieldInfo As Object
+        Set fieldInfo = CreateObject("Scripting.Dictionary")
+        
+        fieldInfo("name") = ExtractJsonValue(fieldObj, "name")
+        fieldInfo("type") = ExtractJsonValue(fieldObj, "type")
+        
+        fields.Add fieldInfo
+        
+        pos = objectEnd + 1
+    Loop
+    
+    Set ParseFields = fields
+End Function
+
+Private Function ParseData(ByVal jsonString As String) As Collection
+    Dim dataRows As New Collection
+    Dim dataStart As Long
+    Dim dataEnd As Long
+    
+    dataStart = InStr(jsonString, """data""")
+    dataStart = InStr(dataStart, jsonString, "[")
+    dataEnd = FindMatchingBracket(jsonString, dataStart, "[", "]")
+    
+    Dim dataContent As String
+    dataContent = Mid$(jsonString, dataStart + 1, dataEnd - dataStart - 1)
+    
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(dataContent)
+        Dim objectStart As Long
+        Dim objectEnd As Long
+        
+        objectStart = InStr(pos, dataContent, "{")
+        If objectStart = 0 Then Exit Do
+        
+        objectEnd = FindMatchingBracket(dataContent, objectStart, "{", "}")
+        
+        Dim rowObj As String
+        rowObj = Mid$(dataContent, objectStart + 1, objectEnd - objectStart - 1)
+        
+        Dim rowData As Object
+        Set rowData = ParseRowObject(rowObj)
+        
+        dataRows.Add rowData
+        
+        pos = objectEnd + 1
+    Loop
+    
+    Set ParseData = dataRows
+End Function
+
+Private Function ParseRowObject(ByVal rowJson As String) As Object
+    Dim rowData As Object
+    Set rowData = CreateObject("Scripting.Dictionary")
+    
+    Dim pos As Long
+    pos = 1
+    
+    Do While pos < Len(rowJson)
+        Dim nameStart As Long
+        Dim nameEnd As Long
+        
+        nameStart = InStr(pos, rowJson, """")
+        If nameStart = 0 Then Exit Do
+        
+        nameEnd = InStr(nameStart + 1, rowJson, """")
+        If nameEnd = 0 Then Exit Do
+        
+        Dim fieldName As String
+        fieldName = Mid$(rowJson, nameStart + 1, nameEnd - nameStart - 1)
+        
+        Dim colonPos As Long
+        colonPos = InStr(nameEnd, rowJson, ":")
+        If colonPos = 0 Then Exit Do
+        
+        Dim valueStart As Long
+        valueStart = colonPos + 1
+        
+        Do While valueStart <= Len(rowJson) And Mid$(rowJson, valueStart, 1) = " "
+            valueStart = valueStart + 1
+        Loop
+        
+        Dim value As Variant
+        Dim valueEnd As Long
+        
+        Select Case Mid$(rowJson, valueStart, 1)
+            Case """"
+                valueEnd = InStr(valueStart + 1, rowJson, """")
+                value = Mid$(rowJson, valueStart + 1, valueEnd - valueStart - 1)
+                pos = valueEnd + 1
+                
+            Case "t", "f"
+                If Mid$(rowJson, valueStart, 4) = "true" Then
+                    value = True
+                    pos = valueStart + 4
+                ElseIf Mid$(rowJson, valueStart, 5) = "false" Then
+                    value = False
+                    pos = valueStart + 5
+                End If
+                
+            Case "n"
+                If Mid$(rowJson, valueStart, 4) = "null" Then
+                    value = Null
+                    pos = valueStart + 4
+                End If
+                
+            Case Else
+                valueEnd = valueStart
+                Do While valueEnd <= Len(rowJson)
+                    Dim ch As String
+                    ch = Mid$(rowJson, valueEnd, 1)
+                    If ch = "," Or ch = "}" Or ch = " " Or ch = vbCr Or ch = vbLf Then
+                        Exit Do
+                    End If
+                    valueEnd = valueEnd + 1
+                Loop
+                
+                Dim numStr As String
+                numStr = Trim$(Mid$(rowJson, valueStart, valueEnd - valueStart))
+                
+                If InStr(numStr, ".") > 0 Then
+                    value = CDbl(numStr)
+                Else
+                    value = CLng(numStr)
+                End If
+                pos = valueEnd
+        End Select
+        
+        rowData(fieldName) = value
+        
+        Dim commaPos As Long
+        commaPos = InStr(pos, rowJson, ",")
+        If commaPos > 0 Then
+            pos = commaPos + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    
+    Set ParseRowObject = rowData
+End Function
+
+//////////////////////////////////////////////////////////////////////////////////////////
+
+Attribute VB_Name = "TestJsonHelper"
+
+'@Description("Example usage function")
+Public Sub ExampleUsage()
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim jsonOutput As String, lvSQL As String
+    
+    
+    lvSQL = "SELECT UserInfo.Name,UserInfo.Account,UserInfo.[E-Mail] FROM UserInfo WHERE (((UserInfo.[E-Mail]) IS NOT NULL));"
+    
+    ' Open database and recordset
+    Set db = CurrentDb() ' or OpenDatabase("path\to\database.mdb")
+    Set rs = db.OpenRecordset(lvSQL)
+    
+    
+    ' Convert to JSON
+    jsonOutput = RecordsetToJSON(rs)
+    
+    ' Output to immediate window
+    Debug.Print jsonOutput
+    
+    ' Or save to file
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim textFile As Object
+    Set textFile = fso.CreateTextFile("C:\data\output.json", True)
+    textFile.Write jsonOutput
+    textFile.Close
+    
+    ' Cleanup
+    rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+End Sub
+
+'@Description("Example usage")
+Public Sub TestJSONToRecordset()
+    Dim jsonString As String
+    jsonString = "{" & _
+        """fields"": [" & _
+        "  {""name"": ""CustomerID"", ""type"": ""string""}," & _
+        "  {""name"": ""CompanyName"", ""type"": ""string""}," & _
+        "  {""name"": ""OrderCount"", ""type"": ""integer""}," & _
+        "  {""name"": ""IsActive"", ""type"": ""boolean""}" & _
+        "]," & _
+        """data"": [" & _
+        "  {""CustomerID"": ""ALFKI"", ""CompanyName"": ""Alfreds Futterkiste"", ""OrderCount"": 6, ""IsActive"": true}," & _
+        "  {""CustomerID"": ""ANATR"", ""CompanyName"": ""Ana Trujillo"", ""OrderCount"": 4, ""IsActive"": false}" & _
+        "]" & _
+        "}"
+    
+    Dim rs As DAO.Recordset
+    Set rs = JSONToRecordset(jsonString)
+    
+    ' Display the results
+    Do While Not rs.EOF
+        Debug.Print rs!CustomerID, rs!CompanyName, rs!OrderCount, rs!IsActive
+        rs.MoveNext
+    Loop
+    
+    rs.Close
+    Set rs = Nothing
+End Sub
+
+'@Description("Example usage of SaveRecordsetToTable")
+Public Sub TestSaveRecordsetToTable()
+    ' Create a sample JSON string
+    Dim jsonString As String
+    jsonString = "{" & _
+        """fields"": [" & _
+        "  {""name"": ""CustomerID"", ""type"": ""string""}," & _
+        "  {""name"": ""CompanyName"", ""type"": ""string""}," & _
+        "  {""name"": ""OrderCount"", ""type"": ""integer""}" & _
+        "]," & _
+        """data"": [" & _
+        "  {""CustomerID"": ""ALFKI"", ""CompanyName"": ""Alfreds Futterkiste"", ""OrderCount"": 6}," & _
+        "  {""CustomerID"": ""ANATR"", ""CompanyName"": ""Ana Trujillo"", ""OrderCount"": 4}" & _
+        "]" & _
+        "}"
+    
+    ' Convert JSON to recordset
+    Dim rs As ADODB.Recordset
+    Set rs = JSONToRecordset(jsonString)
+    
+    ' Save to table
+    Dim success As Boolean
+    success = SaveRecordsetToTable(rs, "ImportedCompanyData")
+    
+    If success Then
+        Debug.Print "Data successfully saved to table!"
+    Else
+        Debug.Print "Failed to save data to table."
+    End If
+    
+    ' Clean up
+    rs.Close
+    Set rs = Nothing
+End Sub
+
+'@Description("Example usage of validation")
+Public Sub TestJSONValidation()
+    Dim jsonString As String
+    Dim errorMsg As String
+    Dim isValid As Boolean
+    
+    ' Valid JSON
+    jsonString = "{" & _
+        """fields"": [" & _
+        "  {""name"": ""ID"", ""type"": ""integer""}," & _
+        "  {""name"": ""Name"", ""type"": ""string""}" & _
+        "]," & _
+        """data"": [" & _
+        "  {""ID"": 1, ""Name"": ""John""}" & _
+        "]" & _
+        "}"
+    
+    isValid = ValidateJSON(jsonString, errorMsg)
+    Debug.Print "Valid JSON test: " & isValid
+    If Not isValid Then Debug.Print "Error: " & errorMsg
+    
+    ' Invalid JSON - missing fields
+    jsonString = "{""data"": []}"
+    
+    isValid = ValidateJSON(jsonString, errorMsg)
+    Debug.Print "Invalid JSON test: " & isValid
+    If Not isValid Then Debug.Print "Error: " & errorMsg
+    
+    ' Invalid JSON - bad field type
+    jsonString = "{" & _
+        """fields"": [" & _
+        "  {""name"": ""ID"", ""type"": ""invalid_type""}" & _
+        "]," & _
+        """data"": []" & _
+        "}"
+    
+    isValid = ValidateJSON(jsonString, errorMsg)
+    Debug.Print "Invalid type test: " & isValid
+    If Not isValid Then Debug.Print "Error: " & errorMsg
+    
+    ' Invalid JSON - undefined field in data
+    jsonString = "{" & _
+        """fields"": [" & _
+        "  {""name"": ""ID"", ""type"": ""integer""}" & _
+        "]," & _
+        """data"": [" & _
+        "  {""ID"": 1, ""UndefinedField"": ""value""}" & _
+        "]" & _
+        "}"
+    
+    isValid = ValidateJSON(jsonString, errorMsg)
+    Debug.Print "Undefined field test: " & isValid
+    If Not isValid Then Debug.Print "Error: " & errorMsg
+End Sub
+
+
+////////////////////////////////////////////////////////////////////////////////
+
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/dao-recordset-simple.json",
+  "title": "DAO Recordset",
+  "description": "Simple JSON Schema for a DAO Recordset representing query results",
+  "type": "object",
+  "required": ["fields", "data"],
+  "properties": {
+    "fields": {
+      "type": "array",
+      "description": "Array of field definitions",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Field/column name"
+          },
+          "type": {
+            "type": "string",
+            "description": "Data type of the field",
+            "enum": [
+              "string",
+              "number",
+              "integer",
+              "boolean",
+              "date",
+              "datetime",
+              "decimal",
+              "text",
+              "binary"
+            ]
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "array",
+      "description": "Array of data rows",
+      "items": {
+        "type": "object",
+        "description": "A single row of data with field names as keys",
+        "additionalProperties": {
+          "description": "Field values keyed by field name",
+          "oneOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"}
+          ]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "fields": [
+        {
+          "name": "CustomerID",
+          "type": "string"
+        },
+        {
+          "name": "CompanyName",
+          "type": "string"
+        },
+        {
+          "name": "OrderCount",
+          "type": "integer"
+        },
+        {
+          "name": "TotalRevenue",
+          "type": "decimal"
+        },
+        {
+          "name": "IsActive",
+          "type": "boolean"
+        },
+        {
+          "name": "LastOrderDate",
+          "type": "date"
+        }
+      ],
+      "data": [
+        {
+          "CustomerID": "ALFKI",
+          "CompanyName": "Alfreds Futterkiste",
+          "OrderCount": 6,
+          "TotalRevenue": 2302.50,
+          "IsActive": true,
+          "LastOrderDate": "2024-12-15"
+        },
+        {
+          "CustomerID": "ANATR",
+          "CompanyName": "Ana Trujillo Emparedados",
+          "OrderCount": 4,
+          "TotalRevenue": 1402.95,
+          "IsActive": true,
+          "LastOrderDate": "2024-11-28"
+        },
+        {
+          "CustomerID": "ANTON",
+          "CompanyName": "Antonio Moreno Taquería",
+          "OrderCount": 7,
+          "TotalRevenue": 3150.00,
+          "IsActive": false,
+          "LastOrderDate": "2024-09-10"
+        }
+      ]
+    }
+  ]
+}
